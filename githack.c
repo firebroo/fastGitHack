@@ -242,14 +242,14 @@ readn (int fd, void *vptr, size_t n)
     return n - nleft;
 }
 
-int
+void
 touch_file_et (http_res_t *response, const char *filename, size_t filesize) {
     unsigned char   *text;
     unsigned long   tlen;
     char            *blob_header, filepath[BUFFER_SIZE * 10] = { '\0' };
 
     if (!filesize) {
-        return 0;
+        return;
     }
     strncat (filepath, filename, BUFFER_SIZE * 10 - 1);
 
@@ -261,7 +261,7 @@ touch_file_et (http_res_t *response, const char *filename, size_t filesize) {
                     response->content_len) != Z_OK) {
         printf ("%s " ESC "[31m[FAILED]" ESC "[0m\n", filename);
         free (text);
-        return 0;
+        return;
     }
 
     printf ("%s " ESC "[35m[OK]" ESC "[0m\n", filename);
@@ -271,13 +271,12 @@ touch_file_et (http_res_t *response, const char *filename, size_t filesize) {
     if ( (fwrite (text + strlen(blob_header) + 1, 1, filesize, 
                   file)) != filesize) {
         printf("frite error");
-        return 0;
+        return;
     };
 
     fclose (file);
     free (text);
     free (blob_header);
-    return 1;
 }
 
 int
@@ -327,13 +326,37 @@ create_all_path_dir(ce_body_t ce_bd){
     }
 }
 
+void 
+task_func (void *arg) {
+    http_des_t   des;
+    http_res_t  *res;
+    int          sockfd2;
+    char         object_url[BUFFER_SIZE] = {'\0'};
+
+    ce_body_t ce_body = (ce_body_t) arg;
+
+    concat_object_uri (ce_body->entry_body, object_url);
+    des.host_port = port;
+    des.uri = object_url;
+    des.host_name = url_combo.host;
+    sockfd2 = http_get (&des);
+    if(sockfd2 <= 0) {
+        /*  ESC (escape) */
+        printf("%s " ESC "[31m[NOT FOUND]" ESC "[0m\n", ce_body->name);
+    }
+    http_parse_response (sockfd2, &res);
+    touch_file_et (res, ce_body->name, hex2dec((ce_body->entry_body->size), 4));
+    http_destroy_response (res);
+    free (ce_body->name);
+    free (ce_body->entry_body);
+    free (ce_body);
+}
+
 void
 parse_index_file (int sockfd)
 {
     char         ch;
     ssize_t      ret;
-    http_des_t   des;
-    http_res_t  *res;
     int          i = 0;
 
     while ((ret = read (sockfd, &ch, 1)) != 0) {
@@ -365,6 +388,8 @@ parse_index_file (int sockfd)
 
         printf("find %d files, downloading~\n", ent_num);
 
+        threadpool thpool = thpool_init(20);
+
         for (j = 0; j < ent_num; j++) {
             ce_body_t       ce_bd;
             size_t          namelen;
@@ -385,53 +410,21 @@ parse_index_file (int sockfd)
             file_flags.stage.stage_two =
                 hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 12);
             namelen = hex2dec (entry_bd->ce_flags, 2) & (0xFFFF >> 4);
-            if (file_flags.extended && hex2dec (magic_head->version, 4) >= 3)
-            {
+            if (file_flags.extended && hex2dec (magic_head->version, 4) >= 3) {
                 handle_version3orlater (sockfd, &entry_len);
             }
 
             ce_bd->name = get_name (sockfd, namelen, &entry_len);
             ce_bd->entry_len = entry_len;
             pad_entry (sockfd, ce_bd->entry_len);
-            create_all_path_dir(ce_bd);
+            create_all_path_dir (ce_bd);
 
-            int pid;
-            if ((pid = fork ()) == -1) {
-                perror ("fork");
-            }
-            if (pid == 0) {
-                int     sockfd2;
-                char    object_url[BUFFER_SIZE] = {'\0'};
-
-                free (magic_head);
-
-                ce_bd->entry_body = entry_bd;
-                concat_object_uri (entry_bd, object_url);
-                des.host_port = port;
-                des.uri = object_url;
-                des.host_name = url_combo.host;
-                sockfd2 = http_get (&des);
-                if(sockfd2 <= 0) {
-                    /*  ESC (escape) */
-                    printf("%s " ESC "[31m[NOT FOUND]" ESC "[0m\n", ce_bd->name);
-                    goto end;
-                }
-                http_parse_response (sockfd2, &res);
-                touch_file_et (res, ce_bd->name, hex2dec((ce_bd->entry_body->size), 4));
-                http_destroy_response (res);
-
-                end:
-                    free (ce_bd->name);
-                    free (entry_bd);
-                    free (ce_bd);
-                    exit (0);
-            }
-            free (ce_bd->name);
-            free (entry_bd);
-            free (ce_bd);
+            ce_bd->entry_body = entry_bd;
+            thpool_add_work (thpool, (void*) task_func, (void*) ce_bd);
         }
         free (magic_head);
-        while (wait(NULL) != -1){}
+        thpool_wait(thpool);
+        thpool_destroy(thpool);
     }
 }
 

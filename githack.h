@@ -23,7 +23,9 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sys/select.h>
+#include <pthread.h>
 #include "http.h"
+#include "thpool.h"
 
 #ifndef bool
 #   define bool           unsigned char
@@ -133,7 +135,7 @@ void setblocking(int sockfd);
 
 ssize_t writen(int fd, const void *vptr, size_t n);
 
-int touch_file_et(http_res_t *response, const char *filename, size_t filesize);
+void touch_file_et(http_res_t *response, const char *filename, size_t filesize);
 
 int create_dir (const char *sPathName);
 
