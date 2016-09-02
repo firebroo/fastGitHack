@@ -1,6 +1,8 @@
 #include <sys/types.h>
 #include <assert.h>
 
+extern char  ip[128];
+
 typedef enum
 {
     HTTP_GET,

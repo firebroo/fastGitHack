@@ -143,7 +143,7 @@ http_get (http_des_t *dest)
         else
             return -1;
     } else
-        return -1;
+        return fd;
 }
 
 ssize_t
@@ -160,7 +160,7 @@ http_put (http_des_t *dest)
         else
             return -1;
     } else
-        return -1;
+        return 1;
 }
 
 ssize_t
@@ -274,13 +274,13 @@ get_ip_from_host (char *ipbuf, const char *host, int maxlen)
     struct hostent     *he;
 
     sa.sin_family = AF_INET;
-    if (inet_aton(host, &sa.sin_addr) == 0) {
-        he = gethostbyname(host);
+    if (inet_aton (host, &sa.sin_addr) == 0) {
+        he = gethostbyname (host);
         if (he == NULL)
             __die__("gethostbyname error.");
-        memcpy(&sa.sin_addr, he->h_addr, sizeof(struct in_addr));
+        memcpy (&sa.sin_addr, he->h_addr, sizeof(struct in_addr));
     }
-    strncpy(ipbuf, inet_ntoa(sa.sin_addr), maxlen);
+    strncpy (ipbuf, inet_ntoa(sa.sin_addr), maxlen);
 
     return 0;
 }
@@ -290,22 +290,32 @@ connect_to_server (const char *host, unsigned short port) {
     int                 sockfd;
     struct sockaddr_in  address;
     int                 conn_ret;
-    char                ip[128] = {0};
+    char                ipBuf[128] = {0};
+    int                 i = 2;
 
-    sockfd = socket (AF_INET, SOCK_STREAM, 0);
+    do {
+        if ((sockfd = socket (AF_INET, SOCK_STREAM, 0)) > 0)
+            break;
+    } while (i--);
+    i = 2;
 
     address.sin_family = AF_INET;
-    if (get_ip_from_host (ip, host, 128) != 0) {
-        __die__("unknown error.");
+    if (ip[0] != '\0') {
+        address.sin_addr.s_addr = inet_addr(ip);
+    } else {
+        if (get_ip_from_host (ipBuf, host, 128) != 0) {
+             __die__("unknown error.");
+        }
+        address.sin_addr.s_addr = inet_addr(ipBuf);
     }
-    address.sin_addr.s_addr = inet_addr(ip);
     address.sin_port = htons(port);
 
-    conn_ret = connect (sockfd, (struct sockaddr *)&address, sizeof(address));
-    if (conn_ret == 0)
-        return sockfd;
-    else
-       __die__("connect to server error.");
+    do {
+        conn_ret = connect (sockfd, (struct sockaddr *)&address, sizeof(address));
+        if (conn_ret == 0) return sockfd;
+    } while (i--);
+
+    return -2;
 }
 
 int
@@ -680,7 +690,6 @@ http_parse_response (int fd, http_res_t **response_)
     int             readn;
     unsigned char  *content;
     int             malloc_size = 1024;
-    int             block_size  = 1024;
     int             effiv_addr  = 0;
 
     *response_ = NULL;

@@ -155,4 +155,6 @@ void parse_index_object (int sockfd);
 
 int strip_http_header (int sockfd);
 
+void task_func (void *arg);
+
 #endif /* GITHACK_H */
