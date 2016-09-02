@@ -145,7 +145,7 @@ void mk_dir (char *path);
 
 int force_rm_dir(const char *path);
 
-void concat_object_uri(entry_body_t entry_bd, char *object_url);
+void concat_object_url(entry_body_t entry_bd, char *object_url);
 
 bool check_argv(int argc, char *argv[]);
 

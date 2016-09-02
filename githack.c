@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include "githack.h"
+#include <curl/curl.h>
 
 static char            *url = NULL;
 static struct           url_combo url_combo;
@@ -332,39 +333,98 @@ create_all_path_dir (ce_body_t ce_bd)
     }
 }
 
+size_t 
+process_data(void *buffer, size_t size, size_t nmemb, void *user_p)
+{
+    FILE *fp = (FILE *)user_p;
+    size_t return_size = fwrite(buffer, size, nmemb, fp);
+    return return_size;
+}
+
 void 
 task_func (void *arg)
 {
     http_des_t   des;
-    http_res_t  *res;
-    int          sockfd2;
     char         object_url[BUFFER_SIZE] = {'\0'};
 
     ce_body_t ce_body = (ce_body_t) arg;
 
-    concat_object_uri (ce_body->entry_body, object_url);
+    concat_object_url (ce_body->entry_body, object_url);
     des.host_port = port;
     des.uri = object_url;
     des.host_name = url_combo.host;
+    if (object_url[0] == '\0') {
+            return; 
+    }
+     
+    CURL *curl;
+    CURLcode res;
+ 
+    curl  = curl_easy_init();
+    FILE* fp = fopen(ce_body->name, "w");
+    size_t retcode;
+    if(curl) {
+       curl_easy_setopt(curl, CURLOPT_URL, object_url);
+        /* example.com is redirected, so we tell libcurl to follow redirection */
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
-    sockfd2 = http_get (&des);
-    if(sockfd2 <= 0) {
-        /*  ESC (escape) */
-        if (sockfd2 == -2) {
-            printf("%s " ESC "[31m[CONNECT SERVER ERROR]" ESC "[0m\n", ce_body->name);
-        } else {
-            printf("%s " ESC "[31m[NOT FOUND]" ESC "[0m\n", ce_body->name);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &process_data);
+ 
+        /* Perform the request, res will get the return code */
+        res = curl_easy_perform(curl);
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE , &retcode);
+        if (retcode == 404) {
+            unlink (ce_body->name);
         }
-        return;
+        /* Check for errors */
+        if(res != CURLE_OK) 
+            fprintf(stderr, "curl_easy_perform() failed: %s\t%s\n",
+                    curl_easy_strerror(res), object_url);
+ 
+        /* always cleanup */
+        curl_easy_cleanup(curl);
     }
 
-    http_parse_response (sockfd2, &res);
+    fclose(fp);
 
-    touch_file_et (res, ce_body->name, hex2dec((ce_body->entry_body->size), 4));
+    //unsigned char   *text;
+    //unsigned long    tlen;
+    //char            *blob_header; 
+    //char             filepath[BUFFER_SIZE * 10] = { '\0' };
 
-    http_destroy_response (res);
 
-    close (sockfd2);
+    //blob_header = (char *) malloc (BLOB_MAX_LEN + 1);
+    //snprintf(blob_header, BLOB_MAX_LEN + 1, "blob %ld", filesize);
+
+    //tlen = filesize + strlen (blob_header) + 1;
+    //text = (unsigned char *) malloc (tlen);
+
+    //if (uncompress (text, &tlen, response->content, 
+    //                response->content_len) != Z_OK) {
+    //    printf ("%s " ESC "[31m[FAILED]" ESC "[0m\n", filename);
+    //    free (text);
+    //    return;
+    //}
+
+    //printf ("%s " ESC "[35m[OK]" ESC "[0m\n", filename);
+
+    //FILE *file = fopen (filename, "wb+");
+    ///* skip write blob header */
+    //if ( (fwrite (text + strlen(blob_header) + 1, 1, filesize, 
+    //              file)) != filesize) {
+    //    printf("frite error");
+    //    return;
+    //}
+
+    //fclose (file);
+    //free (text);
+    //free (blob_header);
+    //touch_file_et (response, ce_body->name, hex2dec((ce_body->entry_body->size), 4));
+
+    //http_destroy_response (res);
+
+    //close (sockfd2);
     free (ce_body->name);
     free (ce_body->entry_body);
     free (ce_body);
@@ -520,15 +580,15 @@ mk_dir (char *path)
 }
 
 void
-concat_object_uri (entry_body_t entry_bd, char *object_url)
+concat_object_url (entry_body_t entry_bd, char *object_url)
 {
     char    *hex_name;
 
     hex_name = sha12hex (entry_bd->sha1);
 
     if (strlen (hex_name) == 40) {
-        snprintf (object_url, BUFFER_SIZE, "%s/objects/%2.2s/%s",
-                  url_combo.uri, hex_name , hex_name + 2);
+        snprintf (object_url, BUFFER_SIZE, "%s%s%sobjects/%2.2s/%s",
+                  url_combo.protocol, url_combo.host, url_combo.uri, hex_name , hex_name + 2);
     }
 
     free(hex_name);
