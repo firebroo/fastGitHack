@@ -151,6 +151,8 @@ bool check_argv(int argc, char *argv[]);
 
 ssize_t readn(int fd, void *vptr, size_t n);
 
-void parse_index_file (int sockfd);
+void parse_index_object (int sockfd);
+
+int strip_http_header (int sockfd);
 
 #endif /* GITHACK_H */

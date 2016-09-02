@@ -343,6 +343,7 @@ task_func (void *arg) {
     if(sockfd2 <= 0) {
         /*  ESC (escape) */
         printf("%s " ESC "[31m[NOT FOUND]" ESC "[0m\n", ce_body->name);
+        return;
     }
     http_parse_response (sockfd2, &res);
     touch_file_et (res, ce_body->name, hex2dec((ce_body->entry_body->size), 4));
@@ -353,7 +354,58 @@ task_func (void *arg) {
 }
 
 void
-parse_index_file (int sockfd)
+parse_index_object (int sockfd)
+{
+    int          ent_num, j;
+    magic_hdr  magic_head;
+
+    //magic_head = (magic_hdr_t) malloc (sizeof (magic_hdr));
+    init_check(sockfd, &magic_head);
+    ent_num = hex2dec (magic_head.file_num, 4);
+
+    printf("find %d files, downloading~\n", ent_num);
+
+    threadpool thpool = thpool_init(20);
+
+    for (j = 0; j < ent_num; j++) {
+        ce_body_t       ce_bd;
+        size_t          namelen;
+        entry_body_t    entry_bd;
+        struct _flags   file_flags;
+        int             entry_len = ENTRY_SIZE;
+
+        entry_bd  = (entry_body_t ) malloc (sizeof (entry_body));
+        ce_bd = (ce_body_t) malloc(sizeof (ce_body));
+        readn (sockfd, entry_bd, sizeof(entry_body));
+        file_flags.assume_valid = hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 15);
+        file_flags.extended = hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 14);
+        if(hex2dec(magic_head.version, 4) == 2) {
+            assert(file_flags.extended == 0);
+        }
+        file_flags.stage.stage_one =
+            hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 13);
+        file_flags.stage.stage_two =
+            hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 12);
+        namelen = hex2dec (entry_bd->ce_flags, 2) & (0xFFFF >> 4);
+        if (file_flags.extended && hex2dec (magic_head.version, 4) >= 3) {
+            handle_version3orlater (sockfd, &entry_len);
+        }
+
+        ce_bd->name = get_name (sockfd, namelen, &entry_len);
+        ce_bd->entry_len = entry_len;
+        pad_entry (sockfd, ce_bd->entry_len);
+        create_all_path_dir (ce_bd);
+
+        ce_bd->entry_body = entry_bd;
+        thpool_add_work (thpool, (void*) task_func, (void*) ce_bd);
+    }
+    //free (magic_head);
+    thpool_wait(thpool);
+    thpool_destroy(thpool);
+}
+
+int 
+strip_http_header (int sockfd)
 {
     char         ch;
     ssize_t      ret;
@@ -370,62 +422,13 @@ parse_index_file (int sockfd)
         }
         if (ch == '\r' || ch == '\n'){
             if (++i == 4)
-                goto handle_http_body;
+                return sockfd;
         }
         else{
             i = 0;
         }
     }
-
-    handle_http_body:
-    {
-        int         ent_num, j;
-        magic_hdr_t magic_head;
-
-        magic_head = (magic_hdr_t) malloc (sizeof (magic_hdr));
-        init_check(sockfd, magic_head);
-        ent_num = hex2dec (magic_head->file_num, 4);
-
-        printf("find %d files, downloading~\n", ent_num);
-
-        threadpool thpool = thpool_init(20);
-
-        for (j = 0; j < ent_num; j++) {
-            ce_body_t       ce_bd;
-            size_t          namelen;
-            entry_body_t    entry_bd;
-            struct _flags   file_flags;
-            int             entry_len = ENTRY_SIZE;
-
-            entry_bd  = (entry_body_t ) malloc (sizeof (entry_body));
-            ce_bd = (ce_body_t) malloc(sizeof (ce_body));
-            readn (sockfd, entry_bd, sizeof(entry_body));
-            file_flags.assume_valid = hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 15);
-            file_flags.extended = hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 14);
-            if(hex2dec(magic_head->version, 4) == 2) {
-                assert(file_flags.extended == 0);
-            }
-            file_flags.stage.stage_one =
-                hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 13);
-            file_flags.stage.stage_two =
-                hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 12);
-            namelen = hex2dec (entry_bd->ce_flags, 2) & (0xFFFF >> 4);
-            if (file_flags.extended && hex2dec (magic_head->version, 4) >= 3) {
-                handle_version3orlater (sockfd, &entry_len);
-            }
-
-            ce_bd->name = get_name (sockfd, namelen, &entry_len);
-            ce_bd->entry_len = entry_len;
-            pad_entry (sockfd, ce_bd->entry_len);
-            create_all_path_dir (ce_bd);
-
-            ce_bd->entry_body = entry_bd;
-            thpool_add_work (thpool, (void*) task_func, (void*) ce_bd);
-        }
-        free (magic_head);
-        thpool_wait(thpool);
-        thpool_destroy(thpool);
-    }
+    return -1;
 }
 
 int
@@ -547,7 +550,7 @@ end:
 int
 main (int argc, char *argv[])
 {
-    int          index_socckfd;
+    int          index_sockfd;
     char         index_uri[2048];
     http_des_t   des;
 
@@ -564,8 +567,12 @@ main (int argc, char *argv[])
     snprintf (index_uri, 2048, "%s%s", url_combo.uri, "index");
     des.uri = index_uri;
     
-    index_socckfd = http_get (&des);
-    parse_index_file (index_socckfd);
-    close(index_socckfd);
+    index_sockfd = http_get (&des);
+
+    if (strip_http_header (index_sockfd) != index_sockfd) {
+        exit(-1);
+    }
+    parse_index_object (index_sockfd);
+
     return 0;
 }
