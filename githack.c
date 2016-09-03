@@ -249,7 +249,7 @@ touch_file_et (http_res_t *response, const char *filename, size_t filesize)
 {
     unsigned char   *text;
     unsigned long    tlen;
-    char            *blob_header; 
+    char            *blob_header;
     char             filepath[BUFFER_SIZE * 10] = { '\0' };
 
     if (!filesize) {
@@ -263,7 +263,7 @@ touch_file_et (http_res_t *response, const char *filename, size_t filesize)
     tlen = filesize + strlen (blob_header) + 1;
     text = (unsigned char *) malloc (tlen);
 
-    if (uncompress (text, &tlen, response->content, 
+    if (uncompress (text, &tlen, response->content,
                     response->content_len) != Z_OK) {
         printf ("%s " ESC "[31m[FAILED]" ESC "[0m\n", filename);
         free (text);
@@ -274,7 +274,7 @@ touch_file_et (http_res_t *response, const char *filename, size_t filesize)
 
     FILE *file = fopen (filename, "wb+");
     /* skip write blob header */
-    if ( (fwrite (text + strlen(blob_header) + 1, 1, filesize, 
+    if ( (fwrite (text + strlen(blob_header) + 1, 1, filesize,
                   file)) != filesize) {
         printf("frite error");
         return;
@@ -333,98 +333,105 @@ create_all_path_dir (ce_body_t ce_bd)
     }
 }
 
-size_t 
-process_data(void *buffer, size_t size, size_t nmemb, void *user_p)
+int
+process_data (void *buffer, size_t size, size_t nmemb, void *stream)
 {
-    FILE *fp = (FILE *)user_p;
-    size_t return_size = fwrite(buffer, size, nmemb, fp);
-    return return_size;
+    body_t bd = (body_t)stream;
+    size_t buffer_size = size * nmemb;
+
+    /*if realloc first arg is NULL and second arg is not NULL, it's equals malloc()*/
+    bd->content = (unsigned char *) realloc (bd->content, buffer_size + bd->lenght);
+    if (bd->content == NULL) {
+        fprintf(stderr, "realloc memory fail\n");
+        return -1;
+    }
+
+    memcpy ((void *)(bd->content + bd->lenght), buffer, buffer_size);
+    bd->lenght += buffer_size;
+
+    return buffer_size;
 }
 
-void 
+
+void
 task_func (void *arg)
 {
-    http_des_t   des;
+    body         bd;
+    CURL        *curl;
+    CURLcode     res;
+    size_t       filesize;
+    char        *filename;
+    size_t       retcode;
     char         object_url[BUFFER_SIZE] = {'\0'};
 
     ce_body_t ce_body = (ce_body_t) arg;
+    filesize = hex2dec ((ce_body->entry_body->size), 4);
+    filename = ce_body->name;
 
     concat_object_url (ce_body->entry_body, object_url);
-    des.host_port = port;
-    des.uri = object_url;
-    des.host_name = url_combo.host;
     if (object_url[0] == '\0') {
-            return; 
+        return;
     }
-     
-    CURL *curl;
-    CURLcode res;
- 
+
+    bd.content = (unsigned char *) malloc (1);
+    bd.lenght  = 0;
+
     curl  = curl_easy_init();
-    FILE* fp = fopen(ce_body->name, "w");
-    size_t retcode;
-    if(curl) {
+    if (curl) {
        curl_easy_setopt(curl, CURLOPT_URL, object_url);
         /* example.com is redirected, so we tell libcurl to follow redirection */
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&bd);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &process_data);
- 
+
         /* Perform the request, res will get the return code */
         res = curl_easy_perform(curl);
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE , &retcode);
-        if (retcode == 404) {
-            unlink (ce_body->name);
-        }
         /* Check for errors */
-        if(res != CURLE_OK) 
+        if(res != CURLE_OK) {
             fprintf(stderr, "curl_easy_perform() failed: %s\t%s\n",
-                    curl_easy_strerror(res), object_url);
- 
-        /* always cleanup */
-        curl_easy_cleanup(curl);
+                            curl_easy_strerror(res),
+                            object_url);
+            return;
+        }
+
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE , &retcode);
+        if (retcode == 200 && bd.lenght > 0) {
+            size_t          tlen;
+            unsigned char   *text;
+            char            *blob_header;
+
+            blob_header = (char *) malloc (BLOB_MAX_LEN + 1);
+            snprintf(blob_header, BLOB_MAX_LEN + 1, "blob %ld", filesize);
+
+            tlen = filesize + strlen (blob_header) + 1;
+            text = (unsigned char *) malloc (tlen);
+
+            if (uncompress (text, &tlen, bd.content,
+                            bd.lenght) != Z_OK) {
+                printf ("%s " ESC "[31m[FAILED]" ESC "[0m\n", filename);
+                free (blob_header);
+                free (text);
+                return;
+            }
+
+            printf ("%s " ESC "[35m[OK]" ESC "[0m\n", filename);
+            /* skip write blob header */
+            FILE* file = fopen (filename, "w");
+            if ( (fwrite (text + strlen(blob_header) + 1, 1, filesize,
+                          file)) != filesize) {
+                printf("frite error");
+            }
+            fclose (file);
+            free (blob_header);
+            free (text);
+            free (bd.content);
+            /* always cleanup */
+            curl_easy_cleanup(curl);
+        }
+    } else {
+        fprintf(stderr, "curl init error.\n");
     }
-
-    fclose(fp);
-
-    //unsigned char   *text;
-    //unsigned long    tlen;
-    //char            *blob_header; 
-    //char             filepath[BUFFER_SIZE * 10] = { '\0' };
-
-
-    //blob_header = (char *) malloc (BLOB_MAX_LEN + 1);
-    //snprintf(blob_header, BLOB_MAX_LEN + 1, "blob %ld", filesize);
-
-    //tlen = filesize + strlen (blob_header) + 1;
-    //text = (unsigned char *) malloc (tlen);
-
-    //if (uncompress (text, &tlen, response->content, 
-    //                response->content_len) != Z_OK) {
-    //    printf ("%s " ESC "[31m[FAILED]" ESC "[0m\n", filename);
-    //    free (text);
-    //    return;
-    //}
-
-    //printf ("%s " ESC "[35m[OK]" ESC "[0m\n", filename);
-
-    //FILE *file = fopen (filename, "wb+");
-    ///* skip write blob header */
-    //if ( (fwrite (text + strlen(blob_header) + 1, 1, filesize, 
-    //              file)) != filesize) {
-    //    printf("frite error");
-    //    return;
-    //}
-
-    //fclose (file);
-    //free (text);
-    //free (blob_header);
-    //touch_file_et (response, ce_body->name, hex2dec((ce_body->entry_body->size), 4));
-
-    //http_destroy_response (res);
-
-    //close (sockfd2);
     free (ce_body->name);
     free (ce_body->entry_body);
     free (ce_body);
@@ -446,7 +453,7 @@ parse_index_object (int sockfd)
 
     printf("find %d files, downloading~\n", ent_num);
 
-    threadpool thpool = thpool_init(20);
+    threadpool thpool = thpool_init(10);
 
     for (j = 0; j < ent_num; j++) {
         entry_len = ENTRY_SIZE;
@@ -485,7 +492,7 @@ parse_index_object (int sockfd)
     thpool_destroy(thpool);
 }
 
-int 
+int
 strip_http_header (int sockfd)
 {
     char         ch;
@@ -645,7 +652,7 @@ main (int argc, char *argv[])
     des.host_port = port;
     snprintf (index_uri, 2048, "%s%s", url_combo.uri, "index");
     des.uri = index_uri;
-    
+
     index_sockfd = http_get (&des);
 
     if (strip_http_header (index_sockfd) != index_sockfd) {

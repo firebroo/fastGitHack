@@ -48,6 +48,12 @@
 
 typedef struct
 {
+    size_t         lenght;
+    unsigned char *content;
+} body, *body_t;
+
+typedef struct
+{
     unsigned char signature[4];
     unsigned char version[4];
     unsigned char file_num[4];
