@@ -453,7 +453,7 @@ parse_index_object (int sockfd)
 
     printf("find %d files, downloading~\n", ent_num);
 
-    threadpool thpool = thpool_init(10);
+    threadpool thpool = thpool_init(20);
 
     for (j = 0; j < ent_num; j++) {
         entry_len = ENTRY_SIZE;
