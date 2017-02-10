@@ -1,9 +1,11 @@
 #include <stddef.h>
 #include "githack.h"
+#include <curl/curl.h>
 
 static char            *url = NULL;
 static struct           url_combo url_combo;
 static unsigned short   port = DEFAULT_PORT;
+char                    ip[128] = {0};
 
 int
 hex2dec (unsigned char *hex, int len)
@@ -242,42 +244,45 @@ readn (int fd, void *vptr, size_t n)
     return n - nleft;
 }
 
-int
-touch_file_et (http_res_t *response, const char *filename, size_t filesize) {
+void
+touch_file_et (http_res_t *response, const char *filename, size_t filesize)
+{
     unsigned char   *text;
-    unsigned long   tlen;
-    char            *blob_header, filepath[BUFFER_SIZE * 10] = { '\0' };
+    unsigned long    tlen;
+    char            *blob_header;
+    char             filepath[BUFFER_SIZE * 10] = { '\0' };
 
     if (!filesize) {
-        return 0;
+        return;
     }
     strncat (filepath, filename, BUFFER_SIZE * 10 - 1);
 
     blob_header = (char *) malloc (BLOB_MAX_LEN + 1);
     snprintf(blob_header, BLOB_MAX_LEN + 1, "blob %ld", filesize);
+
     tlen = filesize + strlen (blob_header) + 1;
     text = (unsigned char *) malloc (tlen);
-    if (uncompress (text, &tlen, response->content, 
+
+    if (uncompress (text, &tlen, response->content,
                     response->content_len) != Z_OK) {
         printf ("%s " ESC "[31m[FAILED]" ESC "[0m\n", filename);
         free (text);
-        return 0;
+        return;
     }
 
     printf ("%s " ESC "[35m[OK]" ESC "[0m\n", filename);
 
     FILE *file = fopen (filename, "wb+");
     /* skip write blob header */
-    if ( (fwrite (text + strlen(blob_header) + 1, 1, filesize, 
+    if ( (fwrite (text + strlen(blob_header) + 1, 1, filesize,
                   file)) != filesize) {
         printf("frite error");
-        return 0;
-    };
+        return;
+    }
 
     fclose (file);
     free (text);
     free (blob_header);
-    return 1;
 }
 
 int
@@ -307,7 +312,8 @@ create_dir (const char *sPathName)
 }
 
 void
-create_all_path_dir(ce_body_t ce_bd){
+create_all_path_dir (ce_body_t ce_bd)
+{
     char    *result;
     char    dir[BUFFER_SIZE] = { '\0' };
 
@@ -327,13 +333,170 @@ create_all_path_dir(ce_body_t ce_bd){
     }
 }
 
+int
+process_data (void *buffer, size_t size, size_t nmemb, void *stream)
+{
+    body_t bd = (body_t)stream;
+    size_t buffer_size = size * nmemb;
+
+    /*if realloc first arg is NULL and second arg is not NULL, it's equals malloc()*/
+    bd->content = (unsigned char *) realloc (bd->content, buffer_size + bd->lenght);
+    if (bd->content == NULL) {
+        fprintf(stderr, "realloc memory fail\n");
+        return -1;
+    }
+
+    memcpy ((void *)(bd->content + bd->lenght), buffer, buffer_size);
+    bd->lenght += buffer_size;
+
+    return buffer_size;
+}
+
+
 void
-parse_index_file (int sockfd)
+task_func (void *arg)
+{
+    body         bd;
+    CURL        *curl;
+    CURLcode     res;
+    size_t       filesize;
+    char        *filename;
+    size_t       retcode;
+    char         object_url[BUFFER_SIZE] = {'\0'};
+
+    ce_body_t ce_body = (ce_body_t) arg;
+    filesize = hex2dec ((ce_body->entry_body->size), 4);
+    filename = ce_body->name;
+
+    concat_object_url (ce_body->entry_body, object_url);
+    if (object_url[0] == '\0') {
+        return;
+    }
+
+    bd.content = (unsigned char *) malloc (1);
+    bd.lenght  = 0;
+
+    curl  = curl_easy_init();
+    if (curl) {
+       curl_easy_setopt(curl, CURLOPT_URL, object_url);
+        /* example.com is redirected, so we tell libcurl to follow redirection */
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&bd);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &process_data);
+
+        /* Perform the request, res will get the return code */
+        res = curl_easy_perform(curl);
+        /* Check for errors */
+        if(res != CURLE_OK) {
+            fprintf(stderr, "curl_easy_perform() failed: %s\t%s\n",
+                            curl_easy_strerror(res),
+                            object_url);
+            return;
+        }
+
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE , &retcode);
+        if (retcode == 200 && bd.lenght > 0) {
+            size_t          tlen;
+            unsigned char   *text;
+            char            *blob_header;
+
+            blob_header = (char *) malloc (BLOB_MAX_LEN + 1);
+            snprintf(blob_header, BLOB_MAX_LEN + 1, "blob %ld", filesize);
+
+            tlen = filesize + strlen (blob_header) + 1;
+            text = (unsigned char *) malloc (tlen);
+
+            if (uncompress (text, &tlen, bd.content,
+                            bd.lenght) != Z_OK) {
+                printf ("%s " ESC "[31m[FAILED]" ESC "[0m\n", filename);
+                free (blob_header);
+                free (text);
+                return;
+            }
+
+            printf ("%s " ESC "[35m[OK]" ESC "[0m\n", filename);
+            /* skip write blob header */
+            FILE* file = fopen (filename, "w");
+            if ( (fwrite (text + strlen(blob_header) + 1, 1, filesize,
+                          file)) != filesize) {
+                printf("frite error");
+            }
+            fclose (file);
+            free (blob_header);
+            free (text);
+            free (bd.content);
+            /* always cleanup */
+            curl_easy_cleanup(curl);
+        }
+    } else {
+        fprintf(stderr, "curl init error.\n");
+    }
+    free (ce_body->name);
+    free (ce_body->entry_body);
+    free (ce_body);
+}
+
+void
+parse_index_object (int sockfd)
+{
+    int             ent_num, j;
+    magic_hdr       magic_head;
+    ce_body_t       ce_bd;
+    size_t          namelen;
+    entry_body_t    entry_bd;
+    struct _flags   file_flags;
+    int             entry_len;
+
+    init_check (sockfd, &magic_head);
+    ent_num = hex2dec (magic_head.file_num, 4);
+
+    printf("find %d files, downloading~\n", ent_num);
+
+    threadpool thpool = thpool_init(10);
+
+    for (j = 0; j < ent_num; j++) {
+        entry_len = ENTRY_SIZE;
+
+        entry_bd  = (entry_body_t ) malloc (sizeof (entry_body));
+        readn (sockfd, entry_bd, sizeof(entry_body));
+
+        file_flags.assume_valid = hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 15);
+        file_flags.extended = hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 14);
+        if(hex2dec(magic_head.version, 4) == 2) {
+            assert(file_flags.extended == 0);
+        }
+        file_flags.stage.stage_one =
+            hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 13);
+        file_flags.stage.stage_two =
+            hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 12);
+
+        if (file_flags.extended && hex2dec (magic_head.version, 4) >= 3) {
+            handle_version3orlater (sockfd, &entry_len);
+        }
+
+        ce_bd = (ce_body_t) malloc(sizeof (ce_body));
+        namelen = hex2dec (entry_bd->ce_flags, 2) & (0xFFFF >> 4);
+        ce_bd->name = get_name (sockfd, namelen, &entry_len);
+        ce_bd->entry_len = entry_len;
+        pad_entry (sockfd, ce_bd->entry_len);
+
+        ce_bd->entry_body = entry_bd;
+
+        create_all_path_dir (ce_bd);
+
+        thpool_add_work (thpool, (void*) task_func, (void*) ce_bd);
+    }
+
+    thpool_wait(thpool);
+    thpool_destroy(thpool);
+}
+
+int
+strip_http_header (int sockfd)
 {
     char         ch;
     ssize_t      ret;
-    http_des_t   des;
-    http_res_t  *res;
     int          i = 0;
 
     while ((ret = read (sockfd, &ch, 1)) != 0) {
@@ -347,92 +510,13 @@ parse_index_file (int sockfd)
         }
         if (ch == '\r' || ch == '\n'){
             if (++i == 4)
-                goto handle_http_body;
+                return sockfd;
         }
         else{
             i = 0;
         }
     }
-
-    handle_http_body:
-    {
-        int         ent_num, j;
-        magic_hdr_t magic_head;
-
-        magic_head = (magic_hdr_t) malloc (sizeof (magic_hdr));
-        init_check(sockfd, magic_head);
-        ent_num = hex2dec (magic_head->file_num, 4);
-
-        printf("find %d files, downloading~\n", ent_num);
-
-        for (j = 0; j < ent_num; j++) {
-            ce_body_t       ce_bd;
-            size_t          namelen;
-            entry_body_t    entry_bd;
-            struct _flags   file_flags;
-            int             entry_len = ENTRY_SIZE;
-
-            entry_bd  = (entry_body_t ) malloc (sizeof (entry_body));
-            ce_bd = (ce_body_t) malloc(sizeof (ce_body));
-            readn (sockfd, entry_bd, sizeof(entry_body));
-            file_flags.assume_valid = hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 15);
-            file_flags.extended = hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 14);
-            if(hex2dec(magic_head->version, 4) == 2) {
-                assert(file_flags.extended == 0);
-            }
-            file_flags.stage.stage_one =
-                hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 13);
-            file_flags.stage.stage_two =
-                hex2dec (entry_bd->ce_flags, 2) & (0x0001 << 12);
-            namelen = hex2dec (entry_bd->ce_flags, 2) & (0xFFFF >> 4);
-            if (file_flags.extended && hex2dec (magic_head->version, 4) >= 3)
-            {
-                handle_version3orlater (sockfd, &entry_len);
-            }
-
-            ce_bd->name = get_name (sockfd, namelen, &entry_len);
-            ce_bd->entry_len = entry_len;
-            pad_entry (sockfd, ce_bd->entry_len);
-            create_all_path_dir(ce_bd);
-
-            int pid;
-            if ((pid = fork ()) == -1) {
-                perror ("fork");
-            }
-            if (pid == 0) {
-                int     sockfd2;
-                char    object_url[BUFFER_SIZE] = {'\0'};
-
-                free (magic_head);
-
-                ce_bd->entry_body = entry_bd;
-                concat_object_uri (entry_bd, object_url);
-                des.host_port = port;
-                des.uri = object_url;
-                des.host_name = url_combo.host;
-                sockfd2 = http_get (&des);
-                if(sockfd2 <= 0) {
-                    /*  ESC (escape) */
-                    printf("%s " ESC "[31m[NOT FOUND]" ESC "[0m\n", ce_bd->name);
-                    goto end;
-                }
-                http_parse_response (sockfd2, &res);
-                touch_file_et (res, ce_bd->name, hex2dec((ce_bd->entry_body->size), 4));
-                http_destroy_response (res);
-
-                end:
-                    free (ce_bd->name);
-                    free (entry_bd);
-                    free (ce_bd);
-                    exit (0);
-            }
-            free (ce_bd->name);
-            free (entry_bd);
-            free (ce_bd);
-        }
-        free (magic_head);
-        while (wait(NULL) != -1){}
-    }
+    return -1;
 }
 
 int
@@ -458,16 +542,11 @@ force_rm_dir(const char *path)
             if (buf) {
                 struct stat statbuf;
                 snprintf (buf, len, "%s/%s", path, p->d_name);
-                if (!stat (buf, &statbuf))
-                {
+                if (!stat (buf, &statbuf)) {
                     if (S_ISDIR (statbuf.st_mode))
-                    {
                         r2 = force_rm_dir (buf);
-                    }
                     else
-                    {
                         r2 = unlink (buf);
-                    }
                 }
                 free (buf);
             }
@@ -475,9 +554,8 @@ force_rm_dir(const char *path)
         }
         closedir (d);
     }
-    if (!r) {
+    if (!r)
         r = rmdir (path);
-    }
     return r;
 }
 
@@ -509,21 +587,23 @@ mk_dir (char *path)
 }
 
 void
-concat_object_uri (entry_body_t entry_bd, char *object_url) {
+concat_object_url (entry_body_t entry_bd, char *object_url)
+{
     char    *hex_name;
 
     hex_name = sha12hex (entry_bd->sha1);
 
     if (strlen (hex_name) == 40) {
-        snprintf (object_url, BUFFER_SIZE, "%s/objects/%2.2s/%s",
-                  url_combo.uri, hex_name , hex_name + 2);
+        snprintf (object_url, BUFFER_SIZE, "%s%s%sobjects/%2.2s/%s",
+                  url_combo.protocol, url_combo.host, url_combo.uri, hex_name , hex_name + 2);
     }
 
     free(hex_name);
 }
 
 bool
-check_argv (int argc, char *argv[]) {
+check_argv (int argc, char *argv[])
+{
     int    opt;
 
     if (argc < 2) {
@@ -554,7 +634,7 @@ end:
 int
 main (int argc, char *argv[])
 {
-    int          index_socckfd;
+    int          index_sockfd;
     char         index_uri[2048];
     http_des_t   des;
 
@@ -566,13 +646,20 @@ main (int argc, char *argv[])
     mk_dir (url_combo.host);
     assert (chdir (url_combo.host) == 0);
 
+    get_ip_from_host (ip, url_combo.host, 128);
+
     des.host_name = url_combo.host;
     des.host_port = port;
     snprintf (index_uri, 2048, "%s%s", url_combo.uri, "index");
     des.uri = index_uri;
-    
-    index_socckfd = http_get (&des);
-    parse_index_file (index_socckfd);
-    close(index_socckfd);
+
+    index_sockfd = http_get (&des);
+
+    if (strip_http_header (index_sockfd) != index_sockfd) {
+        exit(-1);
+    }
+    parse_index_object (index_sockfd);
+
+
     return 0;
 }

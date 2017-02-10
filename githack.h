@@ -23,7 +23,9 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sys/select.h>
+#include <pthread.h>
 #include "http.h"
+#include "thpool.h"
 
 #ifndef bool
 #   define bool           unsigned char
@@ -43,6 +45,12 @@
 #define BLOB_MAX_LEN 100
 #define ESC          "\033"
 #define DEFAULT_PORT 80;
+
+typedef struct
+{
+    size_t         lenght;
+    unsigned char *content;
+} body, *body_t;
 
 typedef struct
 {
@@ -133,7 +141,7 @@ void setblocking(int sockfd);
 
 ssize_t writen(int fd, const void *vptr, size_t n);
 
-int touch_file_et(http_res_t *response, const char *filename, size_t filesize);
+void touch_file_et(http_res_t *response, const char *filename, size_t filesize);
 
 int create_dir (const char *sPathName);
 
@@ -143,12 +151,16 @@ void mk_dir (char *path);
 
 int force_rm_dir(const char *path);
 
-void concat_object_uri(entry_body_t entry_bd, char *object_url);
+void concat_object_url(entry_body_t entry_bd, char *object_url);
 
 bool check_argv(int argc, char *argv[]);
 
 ssize_t readn(int fd, void *vptr, size_t n);
 
-void parse_index_file (int sockfd);
+void parse_index_object (int sockfd);
+
+int strip_http_header (int sockfd);
+
+void task_func (void *arg);
 
 #endif /* GITHACK_H */
