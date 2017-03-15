@@ -63,7 +63,7 @@ type ceBody struct {
 func HttpGet(url string) ([]byte, int) {
     resp, err := http.Get(url)
     if err != nil {
-        return make([]byte, 1), 500  /*请求失败，伪装为服务器内部错误*/
+        return nil, 500  /*请求失败，伪装为服务器内部错误*/
     }
 
     defer resp.Body.Close()
@@ -163,7 +163,7 @@ func UnzipBytes(input []byte) ([]byte, error) {
     b := bytes.NewReader(input)
     r, err := zlib.NewReader(b)
     if err != nil {
-        return input, errors.New("解压失败")
+        return nil, errors.New("解压失败")
     }
     defer r.Close()
     data, err := ioutil.ReadAll(r)
